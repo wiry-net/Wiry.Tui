@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feature/*, fix/*]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  # =============================================================================
+  # Package Job: Quality checks + NuGet package
+  # Runs on Linux only (IL is platform-independent)
+  # =============================================================================
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Check formatting
+        shell: bash
+        run: ./scripts/format.sh
+
+      - name: Run InspectCode
+        uses: JetBrains/ReSharper-InspectCode@v0.11
+        with:
+          solution: Wiry.Tui.sln
+          tool-version: 2025.3.0.3
+
+      - name: Build
+        shell: bash
+        run: ./scripts/build.sh
+
+      - name: Test
+        shell: bash
+        run: ./scripts/test.sh
+
+      - name: Pack
+        shell: bash
+        run: ./scripts/pack.sh
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: ./artifacts/packages/*.nupkg
+
+  # =============================================================================
+  # Samples Job: Cross-platform tests + AOT binaries
+  # Matrix: 1 OS for feature branches, 4 OS for main/PR/tags
+  # =============================================================================
+  prepare-matrix:
+    name: Prepare matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - name: Set matrix based on context
+        id: set
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]] || \
+             [[ "$GITHUB_REF" == refs/tags/* ]] || \
+             [[ "$GITHUB_EVENT_NAME" == "pull_request" && "$GITHUB_BASE_REF" == "main" ]]; then
+            echo "[OK] Full matrix: Linux, Windows, macOS x64, macOS ARM64"
+            echo 'matrix={"include":[{"name":"Linux x64","os":"ubuntu-latest","rid":"linux-x64"},{"name":"Windows x64","os":"windows-latest","rid":"win-x64"},{"name":"macOS x64","os":"macos-13","rid":"osx-x64"},{"name":"macOS ARM64","os":"macos-latest","rid":"osx-arm64"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "[OK] Linux-only matrix (feature branch)"
+            echo 'matrix={"include":[{"name":"Linux x64","os":"ubuntu-latest","rid":"linux-x64"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
+  samples:
+    name: Samples (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    needs: [package, prepare-matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build
+        shell: bash
+        run: ./scripts/build.sh
+
+      - name: Test
+        shell: bash
+        run: ./scripts/test.sh
+
+      - name: Publish samples (AOT)
+        shell: bash
+        run: ./scripts/publish-samples.sh ${{ matrix.rid }}
+
+      - name: Upload samples
+        uses: actions/upload-artifact@v4
+        with:
+          name: samples-${{ matrix.rid }}
+          path: ./artifacts/samples/${{ matrix.rid }}/*
